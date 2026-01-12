@@ -1,0 +1,104 @@
+# California Ambulance Rates Data Dictionary
+
+This document describes each column in `california_ambulance_rates.csv`.
+
+## Overview
+
+The CSV contains ambulance transportation rates for all 58 California counties, scraped from official LEMSA (Local Emergency Medical Services Agency) sources. Rates are organized by HCPCS (Healthcare Common Procedure Coding System) billing codes used for Medicare/Medicaid reimbursement.
+
+---
+
+## Column Definitions
+
+### Identification & Geography
+
+| Column | Description |
+|--------|-------------|
+| **Recorded Date** | Date when this rate record was captured (YYYY-MM-DD format) |
+| **GASO Name** | Ground Ambulance Service Organization name - the entity providing ambulance service |
+| **GASO NPI** | National Provider Identifier (10-digit) for the ambulance service organization |
+| **Service Counties** | California county/counties where this rate applies |
+| **Service Cities** | Cities covered by this ambulance provider within the service area |
+| **Service ZIPs** | ZIP code prefixes (e.g., "956xx, 958xx") indicating coverage areas for address-based rate lookup |
+| **EOA Name** | Exclusive Operating Area identifier - the designated zone where this provider has rights to operate 911 services |
+| **EOA Description** | Additional description of the EOA boundaries or service area |
+
+### Provider Information
+
+| Column | Description |
+|--------|-------------|
+| **Rate Type** | Type of service: "Emergency (911)" for emergency response, "Non-Emergency (IFT)" for inter-facility transfers |
+| **Contracted Ambulance Provider NPI** | NPI of the contracted provider (may differ from GASO if services are subcontracted) |
+| **Contracted Ambulance Provider Name** | Name of the contracted ambulance provider |
+
+### HCPCS Rate Codes
+
+These are the standard Medicare ambulance billing codes. Rates are in USD.
+
+| Column | HCPCS Code | Description |
+|--------|------------|-------------|
+| **A0428 (BLS-NE)** | A0428 | Basic Life Support, Non-Emergency - Scheduled/non-urgent transport |
+| **A0429 (BLS-E)** | A0429 | Basic Life Support, Emergency - 911 response requiring BLS care |
+| **A0426 (ALS1-NE)** | A0426 | Advanced Life Support Level 1, Non-Emergency - Scheduled transport requiring ALS |
+| **A0427 (ALS1-E)** | A0427 | Advanced Life Support Level 1, Emergency - 911 response requiring ALS care |
+| **A0433 (ALS2)** | A0433 | Advanced Life Support Level 2 - ALS with 3+ medications or specific interventions |
+| **A0434 (SCT)** | A0434 | Specialty Care Transport / Critical Care Transport (CCT) - Requires specialized crew beyond paramedic scope |
+| **A0998 (Non-TX)** | A0998 | Ambulance response, no transport (treat and release / dry run) |
+| **A0425 (Mileage)** | A0425 | Ground mileage, per loaded mile - Charged in addition to base rate |
+
+### Metadata & Source Information
+
+| Column | Description |
+|--------|-------------|
+| **Effective Date** | Date when these rates became effective (as stated by the source) |
+| **Additional Comments** | Notes about the rate, special conditions, or data extraction method |
+| **Source URL** | Primary URL where the rate information was obtained |
+| **Rate Source URL** | Direct link to the rate schedule document (PDF or webpage) |
+| **EOA Source URL** | Source for EOA/service area boundary information |
+| **NPI Source URL** | Source for NPI lookup (typically NPPES registry) |
+| **Scraped At** | Timestamp when this record was scraped (ISO 8601 format) |
+
+---
+
+## Rate Code Quick Reference
+
+### Emergency Services (911)
+- **A0429** - BLS Emergency base rate
+- **A0427** - ALS1 Emergency base rate
+- **A0433** - ALS2 (advanced interventions)
+- **A0434** - Critical Care Transport
+
+### Non-Emergency Services (IFT/Scheduled)
+- **A0428** - BLS Non-Emergency base rate
+- **A0426** - ALS1 Non-Emergency base rate
+
+### Additional Charges
+- **A0425** - Mileage (per loaded mile, added to base rate)
+- **A0998** - Response without transport
+
+---
+
+## Usage Notes
+
+1. **Rate Lookup by Address**: Use `Service ZIPs` to match a pickup address to the appropriate rate record. ZIP prefixes use "xx" notation (e.g., "956xx" matches 95601-95699).
+
+2. **Multiple Providers**: Some counties have multiple ambulance providers with different EOAs. Match the pickup location to the correct EOA/provider.
+
+3. **Emergency vs Non-Emergency**: 911 calls use Emergency rates (A0427/A0429). Scheduled hospital transfers use Non-Emergency rates (A0426/A0428).
+
+4. **Total Charge Calculation**:
+   ```
+   Total = Base Rate + (Mileage Rate × Loaded Miles) + Supplies/Oxygen
+   ```
+
+5. **Null Values**: Empty cells indicate the rate was not published or not applicable for that provider/service type.
+
+---
+
+## Data Sources
+
+Rates are scraped from official California LEMSA websites, county EMS agency publications, and AB-716 mandated rate disclosures. See `Source URL` and `Rate Source URL` columns for specific sources.
+
+## Last Updated
+
+See `Scraped At` column for individual record timestamps, or check `california_ambulance_rates.json` for the `scraped_at` metadata field.
