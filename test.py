@@ -55,6 +55,56 @@ COLUMNS: Dict[str, str] = {
 # The unique key column for upsert operations
 UNIQUE_KEY = 'uniqueID'
 
+# =============================================================================
+# DATA TYPE CONFIGURATION - Specify how to parse/clean each column type
+# =============================================================================
+
+# Date columns and their expected format(s) in the CSV
+# Format uses Python strptime conventions: %Y=year, %m=month, %d=day, etc.
+# Multiple formats can be specified as a list - will try each in order
+DATE_COLUMNS: Dict[str, List[str]] = {
+    # 'date_column_name': ['%Y-%m-%d', '%m/%d/%Y', '%d-%b-%Y'],
+}
+
+# Datetime columns and their expected format(s)
+DATETIME_COLUMNS: Dict[str, List[str]] = {
+    # 'datetime_column_name': ['%Y-%m-%d %H:%M:%S', '%m/%d/%Y %I:%M %p'],
+}
+
+# Integer columns (will be parsed and validated)
+INTEGER_COLUMNS: List[str] = [
+    'uniqueID',
+]
+
+# Decimal/float columns (will be parsed, cleaned of currency symbols, etc.)
+DECIMAL_COLUMNS: List[str] = [
+    'value',
+]
+
+# Boolean columns and their true/false mappings
+BOOLEAN_COLUMNS: Dict[str, Dict[str, bool]] = {
+    # 'is_active': {'Y': True, 'N': False, 'Yes': True, 'No': False, '1': True, '0': False},
+}
+
+# Columns to trim whitespace (default: all string columns)
+# Set to None to trim all, or specify a list of column names
+TRIM_COLUMNS: Optional[List[str]] = None  # None = trim all string columns
+
+# Columns to uppercase (useful for codes, statuses, etc.)
+UPPERCASE_COLUMNS: List[str] = [
+    # 'status',
+]
+
+# Columns to lowercase
+LOWERCASE_COLUMNS: List[str] = [
+    # 'email',
+]
+
+# Values to treat as NULL (in addition to defaults)
+ADDITIONAL_NULL_VALUES: List[str] = [
+    '', 'NULL', 'null', 'NA', 'N/A', 'n/a', 'None', 'none', '#N/A', '-',
+]
+
 # Audit columns - automatically managed by the script
 # These are added to both MainTable and HistoryTable
 AUDIT_COLUMNS: Dict[str, str] = {
@@ -79,7 +129,8 @@ class Config:
     """Configuration for the upsert script."""
     server: str
     database: str
-    file_path: str
+    archive_path: str
+    recent_path: str
     schema: str = 'dbo'
     main_table: str = 'MainTable'
     history_table: str = 'HistoryTable'
@@ -92,6 +143,16 @@ class Config:
     audit_columns: Dict[str, str] = field(default_factory=lambda: AUDIT_COLUMNS.copy())
     unique_key: str = UNIQUE_KEY
     system_user: str = SYSTEM_USER
+    # Data cleaning configuration
+    date_columns: Dict[str, List[str]] = field(default_factory=lambda: DATE_COLUMNS.copy())
+    datetime_columns: Dict[str, List[str]] = field(default_factory=lambda: DATETIME_COLUMNS.copy())
+    integer_columns: List[str] = field(default_factory=lambda: INTEGER_COLUMNS.copy())
+    decimal_columns: List[str] = field(default_factory=lambda: DECIMAL_COLUMNS.copy())
+    boolean_columns: Dict[str, Dict[str, bool]] = field(default_factory=lambda: BOOLEAN_COLUMNS.copy())
+    trim_columns: Optional[List[str]] = field(default_factory=lambda: TRIM_COLUMNS)
+    uppercase_columns: List[str] = field(default_factory=lambda: UPPERCASE_COLUMNS.copy())
+    lowercase_columns: List[str] = field(default_factory=lambda: LOWERCASE_COLUMNS.copy())
+    null_values: List[str] = field(default_factory=lambda: ADDITIONAL_NULL_VALUES.copy())
 
     @property
     def main_table_fq(self) -> str:
@@ -107,6 +168,154 @@ class Config:
     def metadata_table_fq(self) -> str:
         """Fully qualified metadata table name."""
         return f"[{self.schema}].[{self.metadata_table}]"
+
+
+# =============================================================================
+# DATA CLEANING FUNCTIONS
+# =============================================================================
+
+def parse_date(value: str, formats: List[str]) -> Optional[datetime]:
+    """Try to parse a date string using multiple formats."""
+    if pd.isna(value) or value is None:
+        return None
+    value_str = str(value).strip()
+    if not value_str:
+        return None
+    for fmt in formats:
+        try:
+            return datetime.strptime(value_str, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def parse_integer(value) -> Optional[int]:
+    """Parse a value as integer, handling common formats."""
+    if pd.isna(value) or value is None:
+        return None
+    try:
+        # Handle string values
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+            # Remove commas and other formatting
+            value = value.replace(',', '').replace(' ', '')
+        return int(float(value))  # Use float first to handle "123.0"
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_decimal(value) -> Optional[float]:
+    """Parse a value as decimal/float, handling currency symbols and formatting."""
+    if pd.isna(value) or value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return None
+            # Remove currency symbols, commas, spaces, parentheses (negative)
+            cleaned = re.sub(r'[$€£¥,\s]', '', value)
+            # Handle parentheses for negative numbers: (100) -> -100
+            if cleaned.startswith('(') and cleaned.endswith(')'):
+                cleaned = '-' + cleaned[1:-1]
+            return float(cleaned)
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def parse_boolean(value, mapping: Dict[str, bool]) -> Optional[bool]:
+    """Parse a value as boolean using the provided mapping."""
+    if pd.isna(value) or value is None:
+        return None
+    value_str = str(value).strip()
+    if not value_str:
+        return None
+    # Try exact match first, then case-insensitive
+    if value_str in mapping:
+        return mapping[value_str]
+    for key, bool_val in mapping.items():
+        if key.lower() == value_str.lower():
+            return bool_val
+    return None
+
+
+def clean_dataframe(df: pd.DataFrame, config: Config) -> pd.DataFrame:
+    """
+    Clean and transform a DataFrame according to configuration.
+
+    Applies the following transformations:
+    - Replace configured null values with None
+    - Trim whitespace from string columns
+    - Parse date columns
+    - Parse datetime columns
+    - Parse integer columns
+    - Parse decimal columns
+    - Parse boolean columns
+    - Apply uppercase/lowercase transformations
+    """
+    df = df.copy()
+
+    # Get list of columns that exist in DataFrame
+    existing_cols = set(df.columns)
+
+    # Replace null values
+    for null_val in config.null_values:
+        df = df.replace(null_val, None)
+
+    # Replace pandas NA/NaN with None
+    df = df.where(pd.notnull(df), None)
+
+    # Trim whitespace from string columns
+    if config.trim_columns is None:
+        # Trim all object (string) columns
+        for col in df.select_dtypes(include=['object']).columns:
+            df[col] = df[col].apply(lambda x: x.strip() if isinstance(x, str) else x)
+    else:
+        for col in config.trim_columns:
+            if col in existing_cols:
+                df[col] = df[col].apply(lambda x: x.strip() if isinstance(x, str) else x)
+
+    # Parse date columns
+    for col, formats in config.date_columns.items():
+        if col in existing_cols:
+            df[col] = df[col].apply(lambda x: parse_date(x, formats))
+            # Convert to date only (not datetime) for SQL DATE columns
+            df[col] = df[col].apply(lambda x: x.date() if isinstance(x, datetime) else x)
+
+    # Parse datetime columns
+    for col, formats in config.datetime_columns.items():
+        if col in existing_cols:
+            df[col] = df[col].apply(lambda x: parse_date(x, formats))
+
+    # Parse integer columns
+    for col in config.integer_columns:
+        if col in existing_cols:
+            df[col] = df[col].apply(parse_integer)
+
+    # Parse decimal columns
+    for col in config.decimal_columns:
+        if col in existing_cols:
+            df[col] = df[col].apply(parse_decimal)
+
+    # Parse boolean columns
+    for col, mapping in config.boolean_columns.items():
+        if col in existing_cols:
+            df[col] = df[col].apply(lambda x: parse_boolean(x, mapping))
+
+    # Apply uppercase transformations
+    for col in config.uppercase_columns:
+        if col in existing_cols:
+            df[col] = df[col].apply(lambda x: x.upper() if isinstance(x, str) else x)
+
+    # Apply lowercase transformations
+    for col in config.lowercase_columns:
+        if col in existing_cols:
+            df[col] = df[col].apply(lambda x: x.lower() if isinstance(x, str) else x)
+
+    return df
 
 
 def get_connection(config: Config) -> pyodbc.Connection:
@@ -141,31 +350,40 @@ def parse_date_from_filename(filename: str) -> Optional[datetime]:
 
 def discover_files(config: Config, start_date: Optional[datetime] = None) -> List[Tuple[Path, datetime]]:
     """
-    Discover CSV files matching the pattern and sort by date.
+    Discover CSV files matching the pattern from both archive and recent folders.
 
     Returns list of (file_path, date) tuples sorted by date ascending.
+    Files with the same date in both folders will use the recent folder version.
     """
-    file_path = Path(config.file_path)
-    if not file_path.exists():
-        logger.error(f"Path does not exist: {file_path}")
-        return []
-
-    files_with_dates = []
+    files_with_dates = {}  # Use dict to dedupe by date (recent takes precedence)
     pattern = f"{FILE_PREFIX}*.csv"
 
-    for csv_file in file_path.glob(pattern):
-        file_date = parse_date_from_filename(csv_file.name)
-        if file_date:
-            if start_date is None or file_date >= start_date:
-                files_with_dates.append((csv_file, file_date))
-        else:
-            logger.warning(f"Skipping file with unparseable date: {csv_file.name}")
+    # Search both paths: archive first, then recent (so recent overwrites duplicates)
+    paths_to_search = [
+        (config.archive_path, "archive"),
+        (config.recent_path, "recent"),
+    ]
 
-    # Sort by date ascending
-    files_with_dates.sort(key=lambda x: x[1])
+    for folder_path, folder_name in paths_to_search:
+        path = Path(folder_path)
+        if not path.exists():
+            logger.warning(f"{folder_name.capitalize()} path does not exist: {path}")
+            continue
 
-    logger.info(f"Discovered {len(files_with_dates)} files to process")
-    return files_with_dates
+        for csv_file in path.glob(pattern):
+            file_date = parse_date_from_filename(csv_file.name)
+            if file_date:
+                if start_date is None or file_date >= start_date:
+                    files_with_dates[file_date] = (csv_file, file_date)
+            else:
+                logger.warning(f"Skipping file with unparseable date: {csv_file.name}")
+
+    # Convert dict to list and sort by date ascending
+    result = list(files_with_dates.values())
+    result.sort(key=lambda x: x[1])
+
+    logger.info(f"Discovered {len(result)} files to process (from archive and recent folders)")
+    return result
 
 
 def get_last_processed_date(conn: pyodbc.Connection, config: Config) -> Optional[datetime]:
@@ -302,6 +520,9 @@ def process_batch(conn: pyodbc.Connection, config: Config, df: pd.DataFrame, att
     if df.empty:
         return
 
+    # Clean and transform the data
+    df = clean_dataframe(df, config)
+
     columns = list(config.columns.keys())
 
     # Ensure DataFrame has all required columns
@@ -343,18 +564,18 @@ def process_file(conn: pyodbc.Connection, config: Config, file_path: Path, file_
 
     try:
         # Read CSV in chunks for memory efficiency
+        # Read all as strings - clean_dataframe handles type conversion and null values
         chunks = pd.read_csv(
             file_path,
             chunksize=config.batch_size,
-            dtype=str,  # Read all as strings, let SQL Server handle conversion
-            na_values=['', 'NULL', 'null', 'NA', 'N/A'],
-            keep_default_na=True
+            dtype=str,
+            keep_default_na=False,  # Don't auto-convert NA values, let clean_dataframe handle it
+            na_filter=False  # Read everything as-is
         )
 
         total_rows = 0
         for i, chunk in enumerate(chunks):
-            # Replace NaN with None for SQL NULL
-            chunk = chunk.where(pd.notnull(chunk), None)
+            # Data cleaning and type conversion happens in process_batch -> clean_dataframe
             process_batch(conn, config, chunk)
             total_rows += len(chunk)
             if (i + 1) % 10 == 0:
@@ -481,17 +702,20 @@ def main():
         epilog="""
 Examples:
   # Daily run (process latest unprocessed files)
-  python csv_sql_upsert.py --server SQLSERVER --database MyDB --path "\\\\server\\share"
+  python csv_sql_upsert.py --server SQLSERVER --database MyDB \\
+      --archive-path "\\\\server\\share\\archive" --recent-path "\\\\server\\share\\recent"
 
   # Full rebuild from specific date
-  python csv_sql_upsert.py --server SQLSERVER --database MyDB --path "\\\\server\\share" \\
+  python csv_sql_upsert.py --server SQLSERVER --database MyDB \\
+      --archive-path "\\\\server\\share\\archive" --recent-path "\\\\server\\share\\recent" \\
       --rebuild --start-date 01012026
         """
     )
 
     parser.add_argument('--server', required=True, help='SQL Server hostname')
     parser.add_argument('--database', required=True, help='Database name')
-    parser.add_argument('--path', required=True, help='UNC path to CSV files')
+    parser.add_argument('--archive-path', required=True, help='UNC path to archive CSV files')
+    parser.add_argument('--recent-path', required=True, help='UNC path to recent CSV files')
     parser.add_argument('--schema', default='dbo', help='Database schema (default: dbo)')
     parser.add_argument('--main-table', default='MainTable', help='Main table name (default: MainTable)')
     parser.add_argument('--history-table', default='HistoryTable', help='History table name (default: HistoryTable)')
@@ -508,7 +732,8 @@ Examples:
     config = Config(
         server=args.server,
         database=args.database,
-        file_path=args.path,
+        archive_path=args.archive_path,
+        recent_path=args.recent_path,
         schema=args.schema,
         main_table=args.main_table,
         history_table=args.history_table,
