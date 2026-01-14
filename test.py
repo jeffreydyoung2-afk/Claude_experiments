@@ -80,6 +80,7 @@ class Config:
     server: str
     database: str
     file_path: str
+    schema: str = 'dbo'
     main_table: str = 'MainTable'
     history_table: str = 'HistoryTable'
     metadata_table: str = 'ProcessingMetadata'
@@ -91,6 +92,21 @@ class Config:
     audit_columns: Dict[str, str] = field(default_factory=lambda: AUDIT_COLUMNS.copy())
     unique_key: str = UNIQUE_KEY
     system_user: str = SYSTEM_USER
+
+    @property
+    def main_table_fq(self) -> str:
+        """Fully qualified main table name."""
+        return f"[{self.schema}].[{self.main_table}]"
+
+    @property
+    def history_table_fq(self) -> str:
+        """Fully qualified history table name."""
+        return f"[{self.schema}].[{self.history_table}]"
+
+    @property
+    def metadata_table_fq(self) -> str:
+        """Fully qualified metadata table name."""
+        return f"[{self.schema}].[{self.metadata_table}]"
 
 
 def get_connection(config: Config) -> pyodbc.Connection:
@@ -158,7 +174,7 @@ def get_last_processed_date(conn: pyodbc.Connection, config: Config) -> Optional
         cursor = conn.cursor()
         cursor.execute(f"""
             SELECT TOP 1 last_processed_date
-            FROM {config.metadata_table}
+            FROM {config.metadata_table_fq}
             ORDER BY last_processed_date DESC
         """)
         row = cursor.fetchone()
@@ -174,7 +190,7 @@ def update_last_processed_date(conn: pyodbc.Connection, config: Config, date: da
     """Update the last processed date in metadata table."""
     cursor = conn.cursor()
     cursor.execute(f"""
-        MERGE INTO {config.metadata_table} AS target
+        MERGE INTO {config.metadata_table_fq} AS target
         USING (SELECT 1 AS id) AS source
         ON 1=1
         WHEN MATCHED THEN UPDATE SET last_processed_date = ?
@@ -202,27 +218,27 @@ def ensure_tables_exist(conn: pyodbc.Connection, config: Config):
 
     # Create MainTable with audit columns
     cursor.execute(f"""
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = '{config.main_table}')
-        CREATE TABLE {config.main_table} ({main_col_defs_with_pk})
+        IF OBJECT_ID('{config.schema}.{config.main_table}', 'U') IS NULL
+        CREATE TABLE {config.main_table_fq} ({main_col_defs_with_pk})
     """)
 
     # Create HistoryTable with snapshot_date and audit columns
     history_col_defs = f"[snapshot_date] DATE NOT NULL, {data_col_defs}, {audit_col_defs}"
     cursor.execute(f"""
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = '{config.history_table}')
-        CREATE TABLE {config.history_table} ({history_col_defs})
+        IF OBJECT_ID('{config.schema}.{config.history_table}', 'U') IS NULL
+        CREATE TABLE {config.history_table_fq} ({history_col_defs})
     """)
 
     # Create index on history table for efficient queries
     cursor.execute(f"""
-        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_{config.history_table}_snapshot_date')
-        CREATE INDEX IX_{config.history_table}_snapshot_date ON {config.history_table} (snapshot_date)
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_{config.schema}_{config.history_table}_snapshot_date')
+        CREATE INDEX IX_{config.schema}_{config.history_table}_snapshot_date ON {config.history_table_fq} (snapshot_date)
     """)
 
     # Create metadata table
     cursor.execute(f"""
-        IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = '{config.metadata_table}')
-        CREATE TABLE {config.metadata_table} (
+        IF OBJECT_ID('{config.schema}.{config.metadata_table}', 'U') IS NULL
+        CREATE TABLE {config.metadata_table_fq} (
             id INT IDENTITY(1,1) PRIMARY KEY,
             last_processed_date DATE NOT NULL
         )
@@ -235,9 +251,9 @@ def ensure_tables_exist(conn: pyodbc.Connection, config: Config):
 def truncate_tables(conn: pyodbc.Connection, config: Config):
     """Truncate MainTable and HistoryTable for rebuild."""
     cursor = conn.cursor()
-    cursor.execute(f"TRUNCATE TABLE {config.main_table}")
-    cursor.execute(f"TRUNCATE TABLE {config.history_table}")
-    cursor.execute(f"TRUNCATE TABLE {config.metadata_table}")
+    cursor.execute(f"TRUNCATE TABLE {config.main_table_fq}")
+    cursor.execute(f"TRUNCATE TABLE {config.history_table_fq}")
+    cursor.execute(f"TRUNCATE TABLE {config.metadata_table_fq}")
     conn.commit()
     logger.info("Tables truncated for rebuild")
 
@@ -268,7 +284,7 @@ def build_merge_statement(config: Config, num_rows: int) -> str:
     insert_values += f", GETDATE(), '{config.system_user}', GETDATE(), '{config.system_user}'"
 
     merge_sql = f"""
-        MERGE INTO {config.main_table} AS target
+        MERGE INTO {config.main_table_fq} AS target
         USING (
             SELECT * FROM (VALUES {values_list}) AS v ({data_col_list})
         ) AS source
@@ -372,9 +388,9 @@ def snapshot_to_history(conn: pyodbc.Connection, config: Config, snapshot_date: 
     col_list = ', '.join([f"[{c}]" for c in all_columns])
 
     cursor.execute(f"""
-        INSERT INTO {config.history_table} (snapshot_date, {col_list})
+        INSERT INTO {config.history_table_fq} (snapshot_date, {col_list})
         SELECT ?, {col_list}
-        FROM {config.main_table}
+        FROM {config.main_table_fq}
     """, snapshot_date.date())
 
     row_count = cursor.rowcount
@@ -476,6 +492,7 @@ Examples:
     parser.add_argument('--server', required=True, help='SQL Server hostname')
     parser.add_argument('--database', required=True, help='Database name')
     parser.add_argument('--path', required=True, help='UNC path to CSV files')
+    parser.add_argument('--schema', default='dbo', help='Database schema (default: dbo)')
     parser.add_argument('--main-table', default='MainTable', help='Main table name (default: MainTable)')
     parser.add_argument('--history-table', default='HistoryTable', help='History table name (default: HistoryTable)')
     parser.add_argument('--batch-size', type=int, default=10000, help='Batch size for processing (default: 10000)')
@@ -492,6 +509,7 @@ Examples:
         server=args.server,
         database=args.database,
         file_path=args.path,
+        schema=args.schema,
         main_table=args.main_table,
         history_table=args.history_table,
         batch_size=args.batch_size,
