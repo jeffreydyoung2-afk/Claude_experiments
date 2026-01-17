@@ -485,7 +485,7 @@ def ensure_tables_exist(conn: pyodbc.Connection, config: Config):
     """)
 
     # Create HistoryTable with snapshot_date and audit columns
-    history_col_defs = f"[snapshot_date] DATE NOT NULL, {data_col_defs}, {audit_col_defs}"
+    history_col_defs = f"[snapshot_date] DATETIME NOT NULL, {data_col_defs}, {audit_col_defs}"
     cursor.execute(f"""
         IF OBJECT_ID('{config.schema}.{config.history_table}', 'U') IS NULL
         CREATE TABLE {config.history_table_fq} ({history_col_defs})
@@ -563,10 +563,12 @@ def bulk_insert_to_staging(conn: pyodbc.Connection, config: Config, df: pd.DataF
     # Select only the columns we need in the right order
     df = df[columns]
 
-    # Replace NaN/NaT/Inf with None for SQL Server compatibility
+    # Replace NaN/NaT/Inf/empty strings with None for SQL Server compatibility
     import math
     def sanitize_value(val):
         if val is None:
+            return None
+        if isinstance(val, str) and val.strip() == '':
             return None
         if isinstance(val, float):
             if math.isnan(val) or math.isinf(val):
@@ -680,8 +682,8 @@ def process_file(conn: pyodbc.Connection, config: Config, file_path: Path, file_
         merge_staging_to_target(conn, config)
         logger.info(f"MERGE complete for {file_path.name}")
 
-        # Step 4: Clear staging table
-        truncate_staging(conn, config)
+        # Note: staging table is NOT truncated here - it's needed for snapshot_to_history
+        # It will be truncated at the start of the next file processing
 
         logger.info(f"Completed processing {total_rows:,} rows from {file_path.name}")
         return True
@@ -704,21 +706,33 @@ def process_file(conn: pyodbc.Connection, config: Config, file_path: Path, file_
         return False
 
 
-def snapshot_to_history(conn: pyodbc.Connection, config: Config, snapshot_date: datetime):
-    """Copy current MainTable state to HistoryTable with snapshot date (including audit columns)."""
+def snapshot_to_history(conn: pyodbc.Connection, config: Config, snapshot_date: datetime, use_file_date: bool = False):
+    """Copy the CSV data (from staging) directly to HistoryTable."""
     cursor = conn.cursor()
 
-    # Include both data columns and audit columns
+    # Data columns from staging
     data_columns = list(config.columns.keys())
+    data_col_list = ', '.join([f"[{c}]" for c in data_columns])
+
+    # All columns for insert (data + audit)
     audit_columns = list(config.audit_columns.keys())
     all_columns = data_columns + audit_columns
-    col_list = ', '.join([f"[{c}]" for c in all_columns])
+    insert_col_list = ', '.join([f"[{c}]" for c in all_columns])
 
-    cursor.execute(f"""
-        INSERT INTO {config.history_table_fq} (snapshot_date, {col_list})
-        SELECT ?, {col_list}
-        FROM {config.main_table_fq}
-    """, snapshot_date.date())
+    if use_file_date:
+        # Rebuild mode: use file date for audit columns
+        cursor.execute(f"""
+            INSERT INTO {config.history_table_fq} (snapshot_date, {insert_col_list})
+            SELECT ?, {data_col_list}, ?, '{config.system_user}', ?, '{config.system_user}'
+            FROM {config.staging_table_fq}
+        """, snapshot_date, snapshot_date, snapshot_date)
+    else:
+        # Daily mode: use current time for audit columns
+        cursor.execute(f"""
+            INSERT INTO {config.history_table_fq} (snapshot_date, {insert_col_list})
+            SELECT ?, {data_col_list}, GETDATE(), '{config.system_user}', GETDATE(), '{config.system_user}'
+            FROM {config.staging_table_fq}
+        """, snapshot_date)
 
     row_count = cursor.rowcount
     conn.commit()
@@ -751,12 +765,18 @@ def run_rebuild(config: Config):
 
         processed_count = 0
         for file_path, file_date in files:
-            if process_file(conn, config, file_path, file_date):
-                snapshot_to_history(conn, config, file_date)
-                update_last_processed_date(conn, config, file_date)
-                processed_count += 1
-            else:
-                logger.warning(f"Skipping file due to errors: {file_path.name}")
+            try:
+                if process_file(conn, config, file_path, file_date):
+                    snapshot_to_history(conn, config, file_date, use_file_date=True)
+                    update_last_processed_date(conn, config, file_date)
+                    processed_count += 1
+                else:
+                    logger.warning(f"Skipping file due to processing errors: {file_path.name}")
+            except pyodbc.Error as e:
+                logger.error(f"Database error after processing {file_path.name}: {e}")
+                conn.rollback()
+            except Exception as e:
+                logger.error(f"Unexpected error after processing {file_path.name}: {e}")
 
         logger.info(f"Rebuild complete. Processed {processed_count}/{len(files)} files.")
 
@@ -788,12 +808,18 @@ def run_daily(config: Config):
         # In daily mode, process files in order
         processed_count = 0
         for file_path, file_date in files:
-            if process_file(conn, config, file_path, file_date):
-                snapshot_to_history(conn, config, file_date)
-                update_last_processed_date(conn, config, file_date)
-                processed_count += 1
-            else:
-                logger.warning(f"Skipping file due to errors: {file_path.name}, continuing to next")
+            try:
+                if process_file(conn, config, file_path, file_date):
+                    snapshot_to_history(conn, config, file_date)
+                    update_last_processed_date(conn, config, file_date)
+                    processed_count += 1
+                else:
+                    logger.warning(f"Skipping file due to processing errors: {file_path.name}, continuing to next")
+            except pyodbc.Error as e:
+                logger.error(f"Database error after processing {file_path.name}: {e}")
+                conn.rollback()
+            except Exception as e:
+                logger.error(f"Unexpected error after processing {file_path.name}: {e}")
 
         logger.info(f"Daily run complete. Processed {processed_count}/{len(files)} new files.")
 
