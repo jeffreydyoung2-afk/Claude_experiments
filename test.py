@@ -28,15 +28,22 @@ import pandas as pd
 import pyodbc
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('csv_sql_upsert.log')
-    ]
-)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Clear any existing handlers to ensure consistent behavior across runs
+if not logger.handlers:
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # File handler
+    file_handler = logging.FileHandler('csv_sql_upsert.log')
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
 
 # =============================================================================
 # CONFIGURATION - UPDATE THESE VALUES TO MATCH YOUR CSV SCHEMA
@@ -52,8 +59,21 @@ COLUMNS: Dict[str, str] = {
     'status': 'VARCHAR(50)',
 }
 
-# The unique key column for upsert operations
+# The unique key column for upsert operations (use SQL column name)
 UNIQUE_KEY = 'uniqueID'
+
+# Column mapping: CSV column name -> SQL column name
+# Use this to rename columns from the CSV file to different SQL column names
+# Only include columns that need renaming; unmapped columns keep their original name
+COLUMN_MAPPING: Dict[str, str] = {
+    # 'csv_column_name': 'sql_column_name',
+    # 'OldName': 'new_name',
+    # 'PLAYER ID': 'player_id',
+}
+
+# Add source filename column to track which file each row came from
+# Set to None to disable, or specify the SQL column name
+SOURCE_FILE_COLUMN: Optional[str] = 'source_file'
 
 # =============================================================================
 # DATA TYPE CONFIGURATION - Specify how to parse/clean each column type
@@ -140,6 +160,8 @@ class Config:
     start_date: Optional[str] = None
     retry_attempts: int = 2
     columns: Dict[str, str] = field(default_factory=lambda: COLUMNS.copy())
+    column_mapping: Dict[str, str] = field(default_factory=lambda: COLUMN_MAPPING.copy())
+    source_file_column: Optional[str] = SOURCE_FILE_COLUMN
     audit_columns: Dict[str, str] = field(default_factory=lambda: AUDIT_COLUMNS.copy())
     unique_key: str = UNIQUE_KEY
     system_user: str = SYSTEM_USER
@@ -168,6 +190,16 @@ class Config:
     def metadata_table_fq(self) -> str:
         """Fully qualified metadata table name."""
         return f"[{self.schema}].[{self.metadata_table}]"
+
+    @property
+    def staging_table(self) -> str:
+        """Staging table name."""
+        return f"{self.main_table}_Staging"
+
+    @property
+    def staging_table_fq(self) -> str:
+        """Fully qualified staging table name."""
+        return f"[{self.schema}].[{self.staging_table}]"
 
 
 # =============================================================================
@@ -387,14 +419,14 @@ def discover_files(config: Config, start_date: Optional[datetime] = None) -> Lis
 
 
 def get_last_processed_date(conn: pyodbc.Connection, config: Config) -> Optional[datetime]:
-    """Get the last processed file date from metadata table."""
+    """Get the last processed file date from metadata table for the specific table."""
     try:
         cursor = conn.cursor()
         cursor.execute(f"""
-            SELECT TOP 1 last_processed_date
+            SELECT last_processed_date
             FROM {config.metadata_table_fq}
-            ORDER BY last_processed_date DESC
-        """)
+            WHERE table_name = ?
+        """, config.main_table)
         row = cursor.fetchone()
         if row:
             return row[0] if isinstance(row[0], datetime) else datetime.strptime(str(row[0]), '%Y-%m-%d')
@@ -405,15 +437,15 @@ def get_last_processed_date(conn: pyodbc.Connection, config: Config) -> Optional
 
 
 def update_last_processed_date(conn: pyodbc.Connection, config: Config, date: datetime):
-    """Update the last processed date in metadata table."""
+    """Update the last processed date in metadata table for the specific table."""
     cursor = conn.cursor()
     cursor.execute(f"""
         MERGE INTO {config.metadata_table_fq} AS target
-        USING (SELECT 1 AS id) AS source
-        ON 1=1
+        USING (SELECT ? AS table_name) AS source
+        ON target.table_name = source.table_name
         WHEN MATCHED THEN UPDATE SET last_processed_date = ?
-        WHEN NOT MATCHED THEN INSERT (last_processed_date) VALUES (?);
-    """, date, date)
+        WHEN NOT MATCHED THEN INSERT (table_name, last_processed_date) VALUES (?, ?);
+    """, config.main_table, date, config.main_table, date)
     conn.commit()
 
 
@@ -440,6 +472,18 @@ def ensure_tables_exist(conn: pyodbc.Connection, config: Config):
         CREATE TABLE {config.main_table_fq} ({main_col_defs_with_pk})
     """)
 
+    # Create Staging table (data columns only, no constraints for fast loading)
+    cursor.execute(f"""
+        IF OBJECT_ID('{config.schema}.{config.staging_table}', 'U') IS NULL
+        CREATE TABLE {config.staging_table_fq} ({data_col_defs})
+    """)
+
+    # Create index on staging table for faster MERGE
+    cursor.execute(f"""
+        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'IX_{config.staging_table}_{config.unique_key}')
+        CREATE INDEX IX_{config.staging_table}_{config.unique_key} ON {config.staging_table_fq} ([{config.unique_key}])
+    """)
+
     # Create HistoryTable with snapshot_date and audit columns
     history_col_defs = f"[snapshot_date] DATE NOT NULL, {data_col_defs}, {audit_col_defs}"
     cursor.execute(f"""
@@ -453,12 +497,14 @@ def ensure_tables_exist(conn: pyodbc.Connection, config: Config):
         CREATE INDEX IX_{config.schema}_{config.history_table}_snapshot_date ON {config.history_table_fq} (snapshot_date)
     """)
 
-    # Create metadata table
+    # Create metadata table (supports multiple table configurations)
     cursor.execute(f"""
         IF OBJECT_ID('{config.schema}.{config.metadata_table}', 'U') IS NULL
         CREATE TABLE {config.metadata_table_fq} (
             id INT IDENTITY(1,1) PRIMARY KEY,
-            last_processed_date DATE NOT NULL
+            table_name VARCHAR(128) NOT NULL,
+            last_processed_date DATE NOT NULL,
+            CONSTRAINT UQ_{config.metadata_table}_table_name UNIQUE (table_name)
         )
     """)
 
@@ -467,58 +513,41 @@ def ensure_tables_exist(conn: pyodbc.Connection, config: Config):
 
 
 def truncate_tables(conn: pyodbc.Connection, config: Config):
-    """Truncate MainTable and HistoryTable for rebuild."""
+    """Truncate MainTable, HistoryTable, and Staging for rebuild, and clear metadata for this table only."""
     cursor = conn.cursor()
     cursor.execute(f"TRUNCATE TABLE {config.main_table_fq}")
     cursor.execute(f"TRUNCATE TABLE {config.history_table_fq}")
-    cursor.execute(f"TRUNCATE TABLE {config.metadata_table_fq}")
+    cursor.execute(f"TRUNCATE TABLE {config.staging_table_fq}")
+    # Only delete the metadata row for this specific table (not the entire table)
+    cursor.execute(f"DELETE FROM {config.metadata_table_fq} WHERE table_name = ?", config.main_table)
     conn.commit()
     logger.info("Tables truncated for rebuild")
 
 
-def build_merge_statement(config: Config, num_rows: int) -> str:
-    """Build a parameterized MERGE statement for batch upsert with audit columns."""
-    # Data columns from CSV
-    data_columns = list(config.columns.keys())
-    data_col_list = ', '.join([f"[{c}]" for c in data_columns])
+def truncate_staging(conn: pyodbc.Connection, config: Config):
+    """Truncate the staging table."""
+    cursor = conn.cursor()
+    cursor.execute(f"TRUNCATE TABLE {config.staging_table_fq}")
+    conn.commit()
 
-    # Build VALUES placeholders for the batch (only data columns from CSV)
-    row_placeholder = '(' + ', '.join(['?' for _ in data_columns]) + ')'
-    values_list = ', '.join([row_placeholder for _ in range(num_rows)])
 
-    # Build UPDATE SET clause for data columns (exclude the unique key)
-    update_data_cols = [c for c in data_columns if c != config.unique_key]
-    update_data_set = ', '.join([f"target.[{c}] = source.[{c}]" for c in update_data_cols])
-
-    # Add audit column updates for UPDATE (only modified_dt and modified_by)
-    update_set = f"{update_data_set}, target.[modified_dt] = GETDATE(), target.[modified_by] = '{config.system_user}'"
-
-    # All columns for INSERT (data + audit)
-    all_insert_cols = data_columns + list(config.audit_columns.keys())
-    insert_col_list = ', '.join([f"[{c}]" for c in all_insert_cols])
-
-    # INSERT values: source data columns + audit defaults
-    insert_values = ', '.join([f'source.[{c}]' for c in data_columns])
-    insert_values += f", GETDATE(), '{config.system_user}', GETDATE(), '{config.system_user}'"
-
-    merge_sql = f"""
-        MERGE INTO {config.main_table_fq} AS target
-        USING (
-            SELECT * FROM (VALUES {values_list}) AS v ({data_col_list})
-        ) AS source
-        ON target.[{config.unique_key}] = source.[{config.unique_key}]
-        WHEN MATCHED THEN
-            UPDATE SET {update_set}
-        WHEN NOT MATCHED THEN
-            INSERT ({insert_col_list}) VALUES ({insert_values});
+def bulk_insert_to_staging(conn: pyodbc.Connection, config: Config, df: pd.DataFrame, filename: str):
     """
-    return merge_sql
+    Bulk insert DataFrame into staging table using fast_executemany.
 
-
-def process_batch(conn: pyodbc.Connection, config: Config, df: pd.DataFrame, attempt: int = 1):
-    """Process a batch of rows using MERGE statement."""
+    This bypasses the 2,100 parameter limit by using pyodbc's fast_executemany
+    which sends data in batches efficiently.
+    """
     if df.empty:
-        return
+        return 0
+
+    # Rename columns from CSV names to SQL names
+    if config.column_mapping:
+        df = df.rename(columns=config.column_mapping)
+
+    # Add source file column if configured
+    if config.source_file_column:
+        df[config.source_file_column] = filename
 
     # Clean and transform the data
     df = clean_dataframe(df, config)
@@ -534,36 +563,100 @@ def process_batch(conn: pyodbc.Connection, config: Config, df: pd.DataFrame, att
     # Select only the columns we need in the right order
     df = df[columns]
 
-    # Convert to list of tuples for pyodbc
-    rows = df.values.tolist()
-    params = [item for row in rows for item in row]  # Flatten
+    # Replace NaN/NaT/Inf with None for SQL Server compatibility
+    import math
+    def sanitize_value(val):
+        if val is None:
+            return None
+        if isinstance(val, float):
+            if math.isnan(val) or math.isinf(val):
+                return None
+        try:
+            if pd.isna(val):
+                return None
+        except (ValueError, TypeError):
+            pass
+        return val
 
-    try:
-        cursor = conn.cursor()
-        merge_sql = build_merge_statement(config, len(rows))
-        cursor.execute(merge_sql, params)
-        conn.commit()
-        logger.debug(f"Processed batch of {len(rows)} rows")
-    except pyodbc.Error as e:
-        conn.rollback()
-        if attempt < config.retry_attempts:
-            logger.warning(f"Batch failed, retrying (attempt {attempt + 1}): {e}")
-            process_batch(conn, config, df, attempt + 1)
-        else:
-            logger.error(f"Batch failed after {attempt} attempts: {e}")
-            raise
+    rows = [tuple(sanitize_value(val) for val in row) for row in df.values.tolist()]
+
+    # Build INSERT statement for staging
+    col_list = ', '.join([f"[{c}]" for c in columns])
+    placeholders = ', '.join(['?' for _ in columns])
+    insert_sql = f"INSERT INTO {config.staging_table_fq} ({col_list}) VALUES ({placeholders})"
+
+    cursor = conn.cursor()
+    cursor.fast_executemany = True  # Enable bulk insert mode
+    cursor.executemany(insert_sql, rows)
+    conn.commit()  # Commit each batch to avoid transaction log bloat on large files
+
+    return len(rows)
+
+
+def merge_staging_to_target(conn: pyodbc.Connection, config: Config):
+    """
+    Execute MERGE from staging table to target table.
+
+    This runs as a single SQL statement with no parameters,
+    avoiding the 2,100 parameter limit entirely.
+    """
+    cursor = conn.cursor()
+
+    # Data columns
+    data_columns = list(config.columns.keys())
+    data_col_list = ', '.join([f"[{c}]" for c in data_columns])
+
+    # Build UPDATE SET clause (exclude the unique key)
+    update_data_cols = [c for c in data_columns if c != config.unique_key]
+    update_data_set = ', '.join([f"target.[{c}] = source.[{c}]" for c in update_data_cols])
+
+    # Add audit column updates for UPDATE
+    update_set = f"{update_data_set}, target.[modified_dt] = GETDATE(), target.[modified_by] = '{config.system_user}'"
+
+    # All columns for INSERT (data + audit)
+    all_insert_cols = data_columns + list(config.audit_columns.keys())
+    insert_col_list = ', '.join([f"[{c}]" for c in all_insert_cols])
+
+    # INSERT values: source data columns + audit defaults
+    insert_values = ', '.join([f'source.[{c}]' for c in data_columns])
+    insert_values += f", GETDATE(), '{config.system_user}', GETDATE(), '{config.system_user}'"
+
+    merge_sql = f"""
+        MERGE INTO {config.main_table_fq} AS target
+        USING {config.staging_table_fq} AS source
+        ON target.[{config.unique_key}] = source.[{config.unique_key}]
+        WHEN MATCHED THEN
+            UPDATE SET {update_set}
+        WHEN NOT MATCHED THEN
+            INSERT ({insert_col_list}) VALUES ({insert_values});
+    """
+
+    cursor.execute(merge_sql)
+    rows_affected = cursor.rowcount
+    conn.commit()
+
+    return rows_affected
 
 
 def process_file(conn: pyodbc.Connection, config: Config, file_path: Path, file_date: datetime) -> bool:
     """
-    Process a single CSV file with batched upserts.
+    Process a single CSV file using staging table approach.
+
+    Flow:
+    1. Truncate staging table
+    2. Bulk insert CSV data into staging (using fast_executemany)
+    3. MERGE from staging to target table
+    4. Truncate staging table
 
     Returns True if successful, False otherwise.
     """
     logger.info(f"Processing file: {file_path.name} (date: {file_date.strftime('%Y-%m-%d')})")
 
     try:
-        # Read CSV in chunks for memory efficiency
+        # Step 1: Clear staging table
+        truncate_staging(conn, config)
+
+        # Step 2: Read CSV in chunks and bulk insert to staging
         # Read all as strings - clean_dataframe handles type conversion and null values
         chunks = pd.read_csv(
             file_path,
@@ -575,11 +668,20 @@ def process_file(conn: pyodbc.Connection, config: Config, file_path: Path, file_
 
         total_rows = 0
         for i, chunk in enumerate(chunks):
-            # Data cleaning and type conversion happens in process_batch -> clean_dataframe
-            process_batch(conn, config, chunk)
-            total_rows += len(chunk)
+            rows_inserted = bulk_insert_to_staging(conn, config, chunk, file_path.name)
+            total_rows += rows_inserted
             if (i + 1) % 10 == 0:
-                logger.info(f"  Processed {total_rows:,} rows so far...")
+                logger.info(f"  Loaded {total_rows:,} rows to staging...")
+
+        logger.info(f"Loaded {total_rows:,} rows to staging table")
+
+        # Step 3: MERGE from staging to target
+        logger.info("Executing MERGE from staging to target...")
+        merge_staging_to_target(conn, config)
+        logger.info(f"MERGE complete for {file_path.name}")
+
+        # Step 4: Clear staging table
+        truncate_staging(conn, config)
 
         logger.info(f"Completed processing {total_rows:,} rows from {file_path.name}")
         return True
@@ -592,6 +694,10 @@ def process_file(conn: pyodbc.Connection, config: Config, file_path: Path, file_
         return False
     except pd.errors.ParserError as e:
         logger.error(f"CSV parsing error for {file_path}: {e}")
+        return False
+    except pyodbc.Error as e:
+        logger.error(f"Database error processing {file_path}: {e}")
+        conn.rollback()
         return False
     except Exception as e:
         logger.error(f"Unexpected error processing {file_path}: {e}")
