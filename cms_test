@@ -13,7 +13,7 @@ import re
 from pathlib import Path
 
 # Configuration
-DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR = Path(r"\\my.network.com\myfiles\data")
 OUTPUT_FILE = Path(__file__).parent / "cms_idr_2025_combined_no_qpa.csv"
 CHUNK_SIZE = 50_000
 
@@ -61,12 +61,88 @@ ABBREVIATIONS = {
     "BC BS": "Blue Cross Blue Shield",
 }
 
+# Issuer name normalization patterns - maps regex patterns to canonical names
+# Order matters: more specific patterns should come before general ones
+ISSUER_PATTERNS = [
+    # Cigna variations
+    (r"\bcigna\b", "Cigna"),
+    (r"\bevernorth\b", "Cigna"),  # Cigna's pharmacy/health services brand
+
+    # Blue Cross Blue Shield variations
+    (r"\bblue\s*cross\s*blue\s*shield\b", "BCBS"),
+    (r"\bblue\s*cross\b", "BCBS"),
+    (r"\bblue\s*shield\b", "BCBS"),
+    (r"\bbcbs\b", "BCBS"),
+    (r"\bbc\s*bs\b", "BCBS"),
+    (r"\banthem\b", "BCBS"),  # Anthem is a BCBS licensee
+    (r"\bempire\s*blue\b", "BCBS"),
+    (r"\bhorizon\s*blue\b", "BCBS"),
+    (r"\bhighmark\b", "BCBS"),
+    (r"\bregence\b", "BCBS"),
+    (r"\bpremera\b", "BCBS"),
+    (r"\bcarefi[r]?st\b", "BCBS"),
+    (r"\bexcellus\b", "BCBS"),
+    (r"\bindependence\s*blue\b", "BCBS"),
+    (r"\bwellmark\b", "BCBS"),
+
+    # UnitedHealth variations
+    (r"\bunited\s*health\s*care\b", "UnitedHealth"),
+    (r"\bunitedhealthcare\b", "UnitedHealth"),
+    (r"\bunited\s*health\b", "UnitedHealth"),
+    (r"\buhc\b", "UnitedHealth"),
+    (r"\boptum\b", "UnitedHealth"),  # UnitedHealth subsidiary
+    (r"\bumr\b", "UnitedHealth"),  # UnitedHealth's TPA
+
+    # Aetna variations
+    (r"\baetna\b", "Aetna"),
+    (r"\bcvs\s*health\b", "Aetna"),  # CVS owns Aetna
+
+    # Humana variations
+    (r"\bhumana\b", "Humana"),
+
+    # Kaiser variations
+    (r"\bkaiser\b", "Kaiser"),
+
+    # Centene/Ambetter variations
+    (r"\bcentene\b", "Centene"),
+    (r"\bambetter\b", "Centene"),
+    (r"\bwellcare\b", "Centene"),
+    (r"\bfidelis\b", "Centene"),
+    (r"\bhealth\s*net\b", "Centene"),
+
+    # Molina variations
+    (r"\bmolina\b", "Molina"),
+
+    # Medicare/Medicaid (government)
+    (r"\bmedicare\b", "Medicare"),
+    (r"\bmedicaid\b", "Medicaid"),
+    (r"\btricare\b", "TRICARE"),
+
+    # Other major insurers
+    (r"\bguardian\b", "Guardian"),
+    (r"\bmetlife\b", "MetLife"),
+    (r"\bprincipal\b", "Principal"),
+    (r"\blincoln\s*(financial|national)\b", "Lincoln Financial"),
+    (r"\bhartford\b", "Hartford"),
+    (r"\baffinity\b", "Affinity"),
+    (r"\bemblem\s*health\b", "EmblemHealth"),
+    (r"\bhealthfirst\b", "Healthfirst"),
+    (r"\boscar\b", "Oscar"),
+    (r"\bclover\b", "Clover"),
+    (r"\bbright\s*health\b", "Bright Health"),
+    (r"\bdevoted\b", "Devoted Health"),
+    (r"\balignment\b", "Alignment Healthcare"),
+]
+
 # Columns that contain names to normalize
 NAME_COLUMNS = [
     "Provider/Facility Group Name",
     "Provider/Facility Name",
     "Health Plan/Issuer Name",
 ]
+
+# Column specifically for issuer normalization
+ISSUER_COLUMN = "Health Plan/Issuer Name"
 
 
 def detect_file_type(filename: str) -> str:
@@ -133,6 +209,26 @@ def normalize_name(name: str) -> str:
     return name.strip()
 
 
+def normalize_issuer_name(name: str) -> str:
+    """Normalize issuer/plan names to canonical forms.
+
+    Maps variations like 'Cigna Health and Life Insurance Company',
+    'Blue Cross Blue Shield of Texas', 'UnitedHealthcare of New York'
+    to their canonical names: 'Cigna', 'BCBS', 'UnitedHealth'.
+    """
+    if not name:
+        return ""
+
+    # Check against all issuer patterns
+    name_lower = name.lower()
+    for pattern, canonical_name in ISSUER_PATTERNS:
+        if re.search(pattern, name_lower):
+            return canonical_name
+
+    # If no pattern matches, apply standard normalization
+    return normalize_name(name)
+
+
 def process_chunk(chunk: pd.DataFrame, file_type: str, quarter: str) -> pd.DataFrame:
     """Process a single chunk of data."""
     # Add source tracking columns
@@ -143,10 +239,14 @@ def process_chunk(chunk: pd.DataFrame, file_type: str, quarter: str) -> pd.DataF
     for col in chunk.columns:
         chunk[col] = chunk[col].apply(clean_value)
 
-    # Normalize name columns
+    # Normalize name columns (provider names get standard normalization)
     for col in NAME_COLUMNS:
         if col in chunk.columns:
-            chunk[col] = chunk[col].apply(normalize_name)
+            if col == ISSUER_COLUMN:
+                # Apply issuer-specific normalization to consolidate insurer names
+                chunk[col] = chunk[col].apply(normalize_issuer_name)
+            else:
+                chunk[col] = chunk[col].apply(normalize_name)
 
     return chunk
 
@@ -252,14 +352,10 @@ def verify_output():
     print("\nSource quarter distribution (sample):")
     print(df_sample["source_quarter"].value_counts())
 
-    # Check for BCBS normalization
+    # Show issuer name distribution after normalization
     if "Health Plan/Issuer Name" in df_sample.columns:
-        bcbs_rows = df_sample[
-            df_sample["Health Plan/Issuer Name"].str.contains("Blue Cross", case=False, na=False)
-        ]
-        if len(bcbs_rows) > 0:
-            print("\nSample Blue Cross Blue Shield names (normalized):")
-            print(bcbs_rows["Health Plan/Issuer Name"].head(10).tolist())
+        print("\nIssuer name distribution (top 20):")
+        print(df_sample["Health Plan/Issuer Name"].value_counts().head(20))
 
 
 if __name__ == "__main__":
