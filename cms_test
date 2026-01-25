@@ -1,0 +1,267 @@
+#!/usr/bin/env python3
+"""
+CMS IDR 2025 Data Processing Script (No QPA Offers)
+
+Combines Air Ambulance and Emergency CSV files into a single cleaned,
+normalized CSV file with unified schema and source tracking.
+Excludes QPA and Offers files.
+"""
+
+import pandas as pd
+import os
+import re
+from pathlib import Path
+
+# Configuration
+DATA_DIR = Path(__file__).parent / "data"
+OUTPUT_FILE = Path(__file__).parent / "cms_idr_2025_combined_no_qpa.csv"
+CHUNK_SIZE = 50_000
+
+# File type mappings (excluding QPA Offers)
+FILE_PATTERNS = {
+    "air_ambulance": "OON Air Ambulance",
+    "emergency": "OON Emergency & Non-Emergency",
+}
+
+# Files to exclude
+EXCLUDE_PATTERN = "QPA and Offers"
+
+# Quarter detection
+QUARTER_PATTERNS = {
+    "Q1": "2025 Q1",
+    "Q2": "2025 Q2",
+}
+
+# Values to treat as missing
+MISSING_VALUES = {"N/A", "N/R", "+", "^", "*", ""}
+
+# Legal suffixes to remove
+LEGAL_SUFFIXES = [
+    r",?\s+Inc\.?$",
+    r",?\s+LLC\.?$",
+    r",?\s+P\.?A\.?$",
+    r",?\s+M\.?D\.?$",
+    r",?\s+P\.?C\.?$",
+    r",?\s+L\.?L\.?C\.?$",
+    r",?\s+Corp\.?$",
+    r",?\s+Corporation$",
+    r",?\s+Company$",
+    r",?\s+Co\.?$",
+    r",?\s+LLP\.?$",
+    r",?\s+PLLC\.?$",
+    r",?\s+P\.?L\.?L\.?C\.?$",
+    r",?\s+Ltd\.?$",
+]
+
+# Abbreviation dictionary for normalization
+ABBREVIATIONS = {
+    "BCBS": "Blue Cross Blue Shield",
+    "UHC": "United Healthcare",
+    "UNITEDHEALTHCARE": "United Healthcare",
+    "BC BS": "Blue Cross Blue Shield",
+}
+
+# Columns that contain names to normalize
+NAME_COLUMNS = [
+    "Provider/Facility Group Name",
+    "Provider/Facility Name",
+    "Health Plan/Issuer Name",
+]
+
+
+def detect_file_type(filename: str) -> str:
+    """Detect the file type based on filename."""
+    for file_type, pattern in FILE_PATTERNS.items():
+        if pattern in filename:
+            return file_type
+    return "unknown"
+
+
+def detect_quarter(filename: str) -> str:
+    """Detect the quarter based on filename."""
+    for quarter, pattern in QUARTER_PATTERNS.items():
+        if pattern in filename:
+            return quarter
+    return "unknown"
+
+
+def clean_value(value) -> str:
+    """Clean a single value - handle missing values and whitespace."""
+    if pd.isna(value):
+        return ""
+    value_str = str(value).strip()
+    if value_str in MISSING_VALUES:
+        return ""
+    return value_str
+
+
+def remove_legal_suffixes(name: str) -> str:
+    """Remove common legal suffixes from a name."""
+    for suffix_pattern in LEGAL_SUFFIXES:
+        name = re.sub(suffix_pattern, "", name, flags=re.IGNORECASE)
+    return name.strip()
+
+
+def expand_abbreviations(name: str) -> str:
+    """Expand known abbreviations in a name."""
+    name_upper = name.upper()
+    for abbrev, expansion in ABBREVIATIONS.items():
+        # Match whole word abbreviations
+        pattern = r"\b" + re.escape(abbrev) + r"\b"
+        if re.search(pattern, name_upper):
+            name = re.sub(pattern, expansion, name, flags=re.IGNORECASE)
+    return name
+
+
+def normalize_name(name: str) -> str:
+    """Apply full normalization to a name."""
+    if not name:
+        return ""
+
+    # Clean whitespace
+    name = " ".join(name.split())
+
+    # Expand abbreviations first (before title case)
+    name = expand_abbreviations(name)
+
+    # Apply title case
+    name = name.title()
+
+    # Remove legal suffixes
+    name = remove_legal_suffixes(name)
+
+    return name.strip()
+
+
+def process_chunk(chunk: pd.DataFrame, file_type: str, quarter: str) -> pd.DataFrame:
+    """Process a single chunk of data."""
+    # Add source tracking columns
+    chunk["source_file_type"] = file_type
+    chunk["source_quarter"] = quarter
+
+    # Clean all values
+    for col in chunk.columns:
+        chunk[col] = chunk[col].apply(clean_value)
+
+    # Normalize name columns
+    for col in NAME_COLUMNS:
+        if col in chunk.columns:
+            chunk[col] = chunk[col].apply(normalize_name)
+
+    return chunk
+
+
+def get_all_columns(files: list) -> list:
+    """Get unified column list from all files."""
+    all_columns = set()
+    for filepath in files:
+        df_sample = pd.read_csv(filepath, nrows=0)
+        all_columns.update(df_sample.columns.tolist())
+
+    # Add our tracking columns
+    all_columns.add("source_file_type")
+    all_columns.add("source_quarter")
+
+    return sorted(list(all_columns))
+
+
+def process_files():
+    """Main processing function."""
+    # Find all CSV files in data directory, excluding QPA Offers
+    all_csv_files = list(DATA_DIR.glob("*.csv"))
+    csv_files = [f for f in all_csv_files if EXCLUDE_PATTERN not in f.name]
+
+    if not csv_files:
+        print(f"No CSV files found in {DATA_DIR}")
+        return
+
+    print(f"Found {len(csv_files)} CSV files to process (excluding QPA Offers)")
+
+    # Get unified column structure
+    all_columns = get_all_columns(csv_files)
+    print(f"Unified schema has {len(all_columns)} columns")
+
+    # Track statistics
+    total_rows = 0
+    first_write = True
+
+    # Process each file
+    for filepath in csv_files:
+        filename = filepath.name
+        file_type = detect_file_type(filename)
+        quarter = detect_quarter(filename)
+
+        print(f"\nProcessing: {filename}")
+        print(f"  Type: {file_type}, Quarter: {quarter}")
+
+        file_rows = 0
+
+        # Process in chunks
+        for chunk_num, chunk in enumerate(pd.read_csv(filepath, chunksize=CHUNK_SIZE, low_memory=False)):
+            # Process the chunk
+            processed_chunk = process_chunk(chunk, file_type, quarter)
+
+            # Ensure all columns exist (fill missing with empty string)
+            for col in all_columns:
+                if col not in processed_chunk.columns:
+                    processed_chunk[col] = ""
+
+            # Reorder columns to match unified schema
+            processed_chunk = processed_chunk[all_columns]
+
+            # Write to output
+            if first_write:
+                processed_chunk.to_csv(OUTPUT_FILE, index=False, mode="w")
+                first_write = False
+            else:
+                processed_chunk.to_csv(OUTPUT_FILE, index=False, mode="a", header=False)
+
+            file_rows += len(chunk)
+
+            if (chunk_num + 1) % 10 == 0:
+                print(f"  Processed {file_rows:,} rows...")
+
+        print(f"  Total: {file_rows:,} rows")
+        total_rows += file_rows
+
+    print(f"\n{'='*50}")
+    print(f"Processing complete!")
+    print(f"Total rows processed: {total_rows:,}")
+    print(f"Output file: {OUTPUT_FILE}")
+
+    # Verify output
+    output_size = OUTPUT_FILE.stat().st_size / (1024 * 1024)
+    print(f"Output file size: {output_size:.1f} MB")
+
+
+def verify_output():
+    """Verify the output file."""
+    print("\n" + "="*50)
+    print("Verification:")
+
+    # Count rows
+    row_count = sum(1 for _ in open(OUTPUT_FILE)) - 1  # subtract header
+    print(f"Output row count: {row_count:,}")
+
+    # Check source distribution
+    df_sample = pd.read_csv(OUTPUT_FILE, nrows=100000)
+
+    print("\nSource file type distribution (sample):")
+    print(df_sample["source_file_type"].value_counts())
+
+    print("\nSource quarter distribution (sample):")
+    print(df_sample["source_quarter"].value_counts())
+
+    # Check for BCBS normalization
+    if "Health Plan/Issuer Name" in df_sample.columns:
+        bcbs_rows = df_sample[
+            df_sample["Health Plan/Issuer Name"].str.contains("Blue Cross", case=False, na=False)
+        ]
+        if len(bcbs_rows) > 0:
+            print("\nSample Blue Cross Blue Shield names (normalized):")
+            print(bcbs_rows["Health Plan/Issuer Name"].head(10).tolist())
+
+
+if __name__ == "__main__":
+    process_files()
+    verify_output()
