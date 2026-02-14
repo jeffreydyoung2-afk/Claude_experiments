@@ -152,5 +152,176 @@ SELECT
   TRY_CAST(REGEXP_REPLACE(CAST(`Provider/Facility Offer as Percent of Median Provider/Facility Offer Amount` AS STRING), '[$%,]', '') AS DOUBLE) AS provider_offer_pct_median,
   TRY_CAST(REGEXP_REPLACE(CAST(`Health Plan/Issuer Offer as Percent of Median Health Plan/Issuer Offer Amount` AS STRING), '[$%,]', '') AS DOUBLE) AS health_plan_offer_pct_median,
   TRY_CAST(REGEXP_REPLACE(CAST(`Prevailing Offer as Percent of Median Prevailing Offer Amount` AS STRING), '[$%,]', '') AS DOUBLE) AS prevailing_offer_pct_median,
-  NULL AS initiating_party
+  CAST(`Initiating Party` AS STRING)  AS initiating_party,
+  CASE 
+    -- 1. UnitedHealth Group (Parent: UNH)
+    -- Includes TPA (UMR), small group (AllSavers), and behavioral
+    WHEN UPPER(CAST(`Health Plan/Issuer Name` AS STRING) RLIKE 'UNITED|UHC|UMR|OXFORD|SUREST|SIERRA|ALLSAVERS|ALL[ ]?SAVERS|GOLDEN[ ]?RULE|UNTIED' 
+         AND UPPER(CAST(`Health Plan/Issuer Name` AS STRING) NOT LIKE '%UNIV%' -- Prevents "University" matches
+    THEN 'UnitedHealth Group'
+
+    -- 2. Elevance Health (The largest BCBS provider)
+    -- Separated from other Blues because it is a distinct publicly traded competitor
+    WHEN UPPER(CAST(`Health Plan/Issuer Name` AS STRING) RLIKE 'ANTHEM|ELEVANCE|WELLPOINT|AMERIGROUP' THEN 'Elevance Health (Anthem)'
+
+    -- 3. Blue Cross Blue Shield (Regional/Independent)
+    -- Catches regional Blues like Florida Blue, Highmark, CareFirst
+    WHEN UPPER(CAST(`Health Plan/Issuer Name` AS STRING) RLIKE 'BLUE[ ]?CROSS|BLUE[ ]?SHIELD|BCBS|BC[ ]?BS|GUIDEWELL|HORIZON|REGENCE|PREMERA|HIGHMARK' 
+    THEN 'BCBS (Regional)'
+
+    -- 4. Aetna / CVS Health
+    -- Includes Meritain (TPA) and major Joint Ventures (Banner, Innovation)
+    WHEN UPPER(CAST(`Health Plan/Issuer Name` AS STRING) RLIKE 'AETNA|MERITAIN|BANNER[ ]?HEALTH|INNOVATION[ ]?HEALTH|ATENA|AENTA' THEN 'Aetna'
+
+    -- 5. Cigna Healthcare
+    -- Catches Great-West and the Cigna+Oscar venture
+    WHEN UPPER(CAST(`Health Plan/Issuer Name` AS STRING) RLIKE 'CIGNA|GREAT[ ]?WEST|CINGA|CIGAN' THEN 'Cigna'
+
+    -- 6. Centene Corporation
+    -- This is often the "missing" piece in health data. Centene uses many local brand names.
+    WHEN UPPER(CAST(`Health Plan/Issuer Name` AS STRING) RLIKE 'AMBETTER|WELLCARE|FIDELIS|HEALTH[ ]?NET|SUNSHINE[ ]?HEALTH|PEACH[ ]?STATE|SUPERIOR[ ]?HEALTH' 
+    THEN 'Centene'
+
+    -- 7. Kaiser Permanente
+    WHEN UPPER(CAST(`Health Plan/Issuer Name` AS STRING) RLIKE 'KAISER|KASIER|PERMANENTE' THEN 'Kaiser Permanente'
+
+    -- 8. Molina Healthcare
+    WHEN UPPER(CAST(`Health Plan/Issuer Name` AS STRING) LIKE '%MOLINA%' THEN 'Molina'
+
+    -- 9. Oscar Health
+    -- Note: This is placed after Cigna to ensure Cigna+Oscar maps to Cigna
+    WHEN UPPER(CAST(`Health Plan/Issuer Name` AS STRING) LIKE '%OSCAR%' THEN 'Oscar Health'
+
+    -- 10. Humana
+    WHEN UPPER(CAST(`Health Plan/Issuer Name` AS STRING) LIKE '%HUMANA%' THEN 'Humana'
+
+    ELSE 'Other / Unclassified'
+END AS payor_group,
+  CASE
+    -- === BILLING / RCM COMPANIES ===
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'saparm.com%' THEN 'SAP ARM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'halomd.com%' THEN 'HaloMD'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'fam-llc%' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'fam-ll.com' THEN 'FAM LLC'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'totalcare.us' THEN 'Total Care'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'agshealth%' THEN 'AGS Health'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'ventra%' THEN 'Ventra Health'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'erevenuebilling%' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'revenuebilling.com' THEN 'E Revenue Billing'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'r1rcm%' THEN 'R1 RCM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'zotecpartner%' THEN 'Zotec Partners'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'rightmed%billing%' THEN 'Right Medical Billing'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'aimbillingsolutions%' THEN 'AIM Billing Solutions'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'omsmedbilling%' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'omemedbilling.com' THEN 'OMS Med Billing'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'ftpbilling%' THEN 'FTP Billing'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'simplexmed%' THEN 'SimplexMed'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'logixhealth%' THEN 'LogixHealth'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'nosur%bill%' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'nosup%bill%' THEN 'No Surprise Bill'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'alldatahealt%' THEN 'AllData Health'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'preferredbillingaz%' THEN 'Preferred Billing AZ'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'syntechhealth%' THEN 'SynTech Health'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'usrcm%' THEN 'USRCM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'islandprofessionalbilling%' THEN 'Island Professional Billing'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'sbsbilling%' THEN 'SBS Billing'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'integrityrcm%' THEN 'Integrity RCM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'heightsrcm%' THEN 'Heights RCM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'karisbilling%' THEN 'Karis Billing'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'elitebilling%' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'eiltebillingllc.com' THEN 'Elite Billing'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'nsabilling%' THEN 'NSA Billing'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'expresserbilling%' THEN 'Express ER Billing'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'agilityrcm%' THEN 'Agility RCM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'wincherbilling%' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'iwncherbilling.com' THEN 'Wincher Billing'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'ahsrcm%' THEN 'AHS RCM'
+
+    -- === RADIOLOGY MANAGEMENT ===
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'sonoranrm%' THEN 'Sonoran RM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'mbbrm%' THEN 'MBB Radiology'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'radpmg%' THEN 'Radiology PMG'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'empireradrm%' THEN 'Empire Radiology RM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'radixhealth%' THEN 'Radix Health'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'iairm.com' THEN 'IAI Revenue Management'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'radalliancerm%' THEN 'Rad Alliance RM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'accessradrm%' THEN 'Access Radiology RM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'midstateradrm%' THEN 'Midstate Radiology RM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'smirm%' THEN 'SMI RM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'redrockrad%' THEN 'Red Rock Radiology'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'collaborativeimaging%' THEN 'Collaborative Imaging'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'racrm%' THEN 'RAC RM'
+
+    -- === LAW FIRMS ===
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'callagy%' THEN 'Callagy Law'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'gottl%greenspan%' THEN 'Gottlieb & Greenspan'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'halkovichlaw%' THEN 'Halkovich Law'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'afslaw%' THEN 'AFS Law'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'glynnlegal%' THEN 'Glynn Legal'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'wolfepincavage%' THEN 'Wolfe Pincavage'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'beinhakerlaw%' THEN 'Beinhaker Law'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'khcfirm%' THEN 'KHC Firm'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'bracewell%' THEN 'Bracewell LLP'
+
+    -- === PHYSICIAN STAFFING / MANAGEMENT ===
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'teamhealth%' THEN 'TeamHealth'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'envisionhealth%' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'envsionhealth.com' THEN 'Envision Healthcare'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'scp%health%' THEN 'SCP Health'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'usacs%' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'uscas.com' THEN 'USACS'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'soundphysicians%' THEN 'Sound Physicians'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'vituity%' THEN 'Vituity'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'apollomd%' THEN 'ApolloMD'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'usap.com' THEN 'US Anesthesia Partners'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'specialtycare%' THEN 'SpecialtyCare'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'orthomedstaffing%' THEN 'OrthoMed Staffing'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'forthesurg%' THEN 'For The Surgeons'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'provanesthesiology%' THEN 'ProVan Anesthesiology'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'pediatrix%' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'pedatrix.com' THEN 'Pediatrix Medical'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'northstaranesthesia%' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'northstardoc.com' THEN 'NorthStar Anesthesia'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'ascentemc%' THEN 'Ascent EMC'
+
+    -- === MSO / CONSULTING / ADVISORY ===
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'mdcapitaladvi%' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'mdcapitaladviors.com' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'mdcapitaladvsors%' THEN 'MD Capital Advisors'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'qmacsmso%' THEN 'QMACS MSO'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'gryphonhc.com' THEN 'Gryphon Healthcare'
+
+    -- === HOSPITAL SYSTEMS ===
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'primehealthc%' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'primeheathcare.com' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'primhealthcare.com' THEN 'Prime Healthcare'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'bmhcc.org' THEN 'Baptist Memorial'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'altushealthsystem%' THEN 'Altus Health System'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'hcahealthcare%' THEN 'HCA Healthcare'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'commonspirit%' THEN 'CommonSpirit Health'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'adventhealth%' THEN 'AdventHealth'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'wellstar%' THEN 'WellStar Health'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'tenethealth%' THEN 'Tenet Healthcare'
+
+    -- === AIR AMBULANCE ===
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'gmr.net' THEN 'Global Medical Response'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'phiairmedical%' THEN 'PHI Air Medical'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'airmethods%' THEN 'Air Methods'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'apollomedflight%' THEN 'Apollo MedFlight'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'survivalflightinc%' THEN 'Survival Flight'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'lifeflight%' OR CAST(`Health Plan/Issuer Email Domain` AS STRING)  = 'lifeflightmaine.org' THEN 'LifeFlight'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'superiorambulance%' THEN 'Superior Ambulance'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'lifelinkiii%' THEN 'LifeLink III'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'mercyflight%' THEN 'Mercy Flights'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'careflite%' THEN 'CareFlite'
+
+    -- === ER GROUPS ===
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'memorialvillageer%' THEN 'Memorial Village ER'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'americaser%' THEN 'AmericasER'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'complete.care%' THEN 'Complete Care'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'neighborshealth%' THEN 'Neighbors Health'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'victoriaemergency%' THEN 'Victoria Emergency'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'bellaireer%' THEN 'Bellaire ER'
+
+    -- === IOM / NEUROMONITORING ===
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'nmaiom%' THEN 'NMA IOM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'unitedionm%' THEN 'United IOM'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'epiomneuro%' THEN 'EpiOM Neuro'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'ansmonitoring%' THEN 'ANS Monitoring'
+
+    -- === OTHER NOTABLE ===
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'roundtmc%' THEN 'Round TMC'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'legacyhealthllc%' THEN 'Legacy Health LLC'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'anesthesiadynamics%' THEN 'Anesthesia Dynamics'
+    WHEN CAST(`Health Plan/Issuer Email Domain` AS STRING)  LIKE 'summit-az%' THEN 'Summit AZ'
+
+    ELSE 'Other'
+END AS provider_domain_name_entity
+
 FROM src_2024_q1_emergency;
