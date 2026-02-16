@@ -1,3 +1,170 @@
+
+
+CASE health_plan_type
+    WHEN 'Individual health insurance issuer' THEN 'IFP'
+    WHEN 'Fully insured private group health plan' THEN 'Fully Insured Group'
+    WHEN 'Either partially or fully self-insured private (employment-based) group health plan' THEN 'Self-Insured / ASO'
+    WHEN 'Non-federal government plan (or state or local government plan)' THEN 'State/Local Government'
+    WHEN 'Federal Employees Health Benefits (FEHB) Carrier' THEN 'FEHB'
+    WHEN 'Church Plan' THEN 'Church Plan'
+    WHEN 'No Plan/Issuer Response' THEN 'No Response'
+    ELSE 'Other'
+END AS plan_type
+
+
+CASE
+    -- Air Ambulance (this field = vehicle capacity, not specialty)
+    WHEN data_type = 'air_ambulance' THEN 'Air Ambulance'
+
+    -- Not reported / redacted / junk
+    WHEN specialty_or_capacity_level IS NULL THEN 'N/R'
+    WHEN UPPER(specialty_or_capacity_level) IN ('N/R', 'NA', 'REDACTED', 'DISP-REDACTED', 'DUPLICATE', 'PROVIDER') THEN 'N/R'
+
+    -- === Specific specialties (most specific first) ===
+
+    -- Neuromonitoring / IOM (before Neurology/Neurosurgery)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%INTRAOP%' THEN 'Neuromonitoring (IOM)'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%NEUROMONIT%' THEN 'Neuromonitoring (IOM)'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%NEUROMONIOT%' THEN 'Neuromonitoring (IOM)'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%NEUROMOMIT%' THEN 'Neuromonitoring (IOM)'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%INTEROP%NEURO%' THEN 'Neuromonitoring (IOM)'
+    WHEN UPPER(specialty_or_capacity_level) LIKE 'IOM%' THEN 'Neuromonitoring (IOM)'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '% IOM%' THEN 'Neuromonitoring (IOM)'
+    WHEN UPPER(specialty_or_capacity_level) LIKE 'IONM%' THEN 'Neuromonitoring (IOM)'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '% IONM%' THEN 'Neuromonitoring (IOM)'
+    WHEN UPPER(specialty_or_capacity_level) LIKE 'CNIM%' THEN 'Neuromonitoring (IOM)'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%OON NEUROMONITOR%' THEN 'Neuromonitoring (IOM)'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%NEURO MONITOR%' THEN 'Neuromonitoring (IOM)'
+
+    -- Surgical Assist (before other surgery categories)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%SURGICAL ASSIST%' THEN 'Surgical Assist'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%SURGICAL ASST%' THEN 'Surgical Assist'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%FIRST ASSIST%' THEN 'Surgical Assist'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%SURG%ASSISTANCE%' THEN 'Surgical Assist'
+
+    -- Neonatology (before Pediatrics)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%NEONAT%' THEN 'Neonatology'
+
+    -- Neurosurgery (before Neurology and General Surgery)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%NEUROSURG%' THEN 'Neurosurgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%NEUROLOGICAL SURG%' THEN 'Neurosurgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%NEURO SURG%' THEN 'Neurosurgery'
+
+    -- Orthopedic Surgery (including common typos)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%ORTHO%' THEN 'Orthopedic Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%OTRHO%' THEN 'Orthopedic Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%FOOT AND ANKLE%' THEN 'Orthopedic Surgery'
+
+    -- Plastic / Reconstructive Surgery
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%PLASTI%' THEN 'Plastic / Reconstructive Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%RECONSTRUCTI%' THEN 'Plastic / Reconstructive Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%HAND SURG%' THEN 'Plastic / Reconstructive Surgery'
+
+    -- OB/GYN
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%OBSTET%' THEN 'OB/GYN'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%GYNEC%' THEN 'OB/GYN'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%OBGYN%' THEN 'OB/GYN'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%OB/GYN%' THEN 'OB/GYN'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%OB GYN%' THEN 'OB/GYN'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%ENDOMETRIOSIS%' THEN 'OB/GYN'
+
+    -- Vascular Surgery (before General Surgery and Cardiology)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%VASCULAR%SURG%' THEN 'Vascular Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%VASCULAR AND ENDO%' THEN 'Vascular Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%VASCULAR%PROCEDURE%' THEN 'Vascular Surgery'
+    WHEN UPPER(specialty_or_capacity_level) = 'VASCULAR' THEN 'Vascular Surgery'
+
+    -- Cardiothoracic Surgery (before General Surgery)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%CARDIOTHORACIC%' THEN 'Cardiothoracic Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%THORACIC SURG%' THEN 'Cardiothoracic Surgery'
+
+    -- Spine Surgery (after Ortho/Neuro catch their specific variants)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%SPIN%SURG%' THEN 'Spine Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%SPINAL%' THEN 'Spine Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE 'SPINE%' THEN 'Spine Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '% SPINE%' THEN 'Spine Surgery'
+
+    -- General Surgery (including trauma, bariatric)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%GENERAL SURG%' THEN 'General Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%GENERAL%BARIATRIC%' THEN 'General Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%BARIATRIC%' THEN 'General Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%TRAUMA%SURG%' THEN 'General Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%TRAUMA%CRITICAL%' THEN 'General Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%LAPAROSCOPIC SURG%' THEN 'General Surgery'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%COLORECTAL%' THEN 'General Surgery'
+    WHEN UPPER(specialty_or_capacity_level) = 'SURGERY' THEN 'General Surgery'
+    WHEN UPPER(specialty_or_capacity_level) = 'TRAUMA' THEN 'General Surgery'
+
+    -- Urology
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%UROLOG%' THEN 'Urology'
+
+    -- Neurology (after Neuromonitoring and Neurosurgery)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%NEUROLOG%' THEN 'Neurology'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%NEUROPHYSI%' THEN 'Neurology'
+    WHEN UPPER(specialty_or_capacity_level) = 'NEURO' THEN 'Neurology'
+
+    -- Pain Management
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%PAIN M%' THEN 'Pain Management'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%PAIN MEDI%' THEN 'Pain Management'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%INTERVENTIONAL PAIN%' THEN 'Pain Management'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%INTERVENTIONAL SPINE%' THEN 'Pain Management'
+
+    -- Anesthesiology (including typos)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%ANESTHE%' THEN 'Anesthesiology'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%ANETHESIA%' THEN 'Anesthesiology'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%ANESTHSIA%' THEN 'Anesthesiology'
+    WHEN UPPER(specialty_or_capacity_level) = 'ANES' THEN 'Anesthesiology'
+
+    -- Radiology
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%RADIOL%' THEN 'Radiology'
+
+    -- Hospitalist / Hospital Medicine (before Hospital/Facility catch-all)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%HOSPITALIST%' THEN 'Hospitalist'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%HOSPITAL MED%' THEN 'Hospitalist'
+
+    -- Internal Medicine
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%INTERNAL MED%' THEN 'Internal Medicine'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%CRITICAL CARE%' THEN 'Internal Medicine'
+
+    -- Cardiology (non-surgical, including electrophysiology)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%CARDIOL%' THEN 'Cardiology'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%CARDIOVASCUL%' THEN 'Cardiology'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%ELECTROPHYSI%' THEN 'Cardiology'
+
+    -- Gastroenterology
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%GASTRO%' THEN 'Gastroenterology'
+
+    -- Lab / Pathology
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%PATHOL%' THEN 'Lab / Pathology'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%LABORATOR%' THEN 'Lab / Pathology'
+    WHEN UPPER(specialty_or_capacity_level) = 'LAB' THEN 'Lab / Pathology'
+
+    -- Pediatrics (remaining after Neonatology)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%PEDIATRI%' THEN 'Pediatrics'
+
+    -- Emergency Medicine (broad catch-all for ER, including typos)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%EMERG%' THEN 'Emergency Medicine'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%EMERIG%' THEN 'Emergency Medicine'
+    WHEN UPPER(specialty_or_capacity_level) = 'ED' THEN 'Emergency Medicine'
+    WHEN UPPER(specialty_or_capacity_level) = 'ER' THEN 'Emergency Medicine'
+    WHEN UPPER(specialty_or_capacity_level) LIKE 'ER %' THEN 'Emergency Medicine'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '% ER' THEN 'Emergency Medicine'
+
+    -- Hospital / Facility (catch-all for facility-level entries, including typos)
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%HOSPITAL%' THEN 'Hospital / Facility'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%HOSPTIAL%' THEN 'Hospital / Facility'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%HOSTIPAL%' THEN 'Hospital / Facility'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%ACUTE CARE%' THEN 'Hospital / Facility'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%ACUTE ACADEMIC%' THEN 'Hospital / Facility'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%FACILITY%' THEN 'Hospital / Facility'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%NOT FOR PROFIT%' THEN 'Hospital / Facility'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%NON PROFIT%' THEN 'Hospital / Facility'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%SPECIAL HOSPITAL%' THEN 'Hospital / Facility'
+    WHEN UPPER(specialty_or_capacity_level) LIKE '%TEACHING HOSPITAL%' THEN 'Hospital / Facility'
+
+    ELSE 'Other'
+END AS specialty_group
+
 -- Databricks notebook source
 
 -- MAGIC %md
