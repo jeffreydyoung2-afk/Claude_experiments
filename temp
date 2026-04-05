@@ -1,0 +1,82 @@
+# Your configuration
+column_types = {
+    "TransactionID": "INT",
+    "ServiceDate": "DATE",
+    "RateAmount": "DECIMAL(18,2)",
+    "ProviderNPI": "BIGINT"
+}
+
+staging_table = "stg_AmbulanceRates"
+problem_table = "stg_AmbulanceRates_Errors"
+
+# 1. Build the list of columns for the SELECT statement
+columns_str = ", ".join([f"[{col}]" for col in column_types.keys()])
+
+# 2. Build the WHERE clause to find ANY failure
+# Logic: TRY_CAST is NULL but the original value was NOT NULL
+where_conditions = [
+    f"(TRY_CAST([{col}] AS {dtype}) IS NULL AND [{col}] IS NOT NULL)" 
+    for col, dtype in column_types.items()
+]
+where_clause = " OR ".join(where_conditions)
+
+# 3. Build the CASE statement to identify WHICH column failed
+reason_cases = [
+    f"WHEN TRY_CAST([{col}] AS {dtype}) IS NULL AND [{col}] IS NOT NULL THEN 'Invalid {dtype}: ' + [{col}]"
+    for col, dtype in column_types.items()
+]
+reason_clause = "CASE " + " ".join(reason_cases) + " ELSE 'Multiple Validation Failures' END"
+
+# 4. Construct the final SQL
+sql = f"""
+INSERT INTO {problem_table} ({columns_str}, ErrorReason)
+SELECT {columns_str}, {reason_clause}
+FROM {staging_table}
+WHERE {where_clause};
+
+-- Optional: Remove the problem rows from staging after diverting
+DELETE FROM {staging_table}
+WHERE {where_clause};
+"""
+
+# Execute using your connection object
+cursor = conn.cursor()
+cursor.execute(sql)
+conn.commit()
+
+
+
+# 1. Build the list of all columns for the INSERT
+all_columns = ", ".join([f"[{col}]" for col in column_types.keys()])
+
+# 2. Construct the Duplicate Divert SQL
+duplicate_sql = f"""
+WITH DuplicateCheck AS (
+    SELECT *,
+           ROW_NUMBER() OVER (
+               PARTITION BY {partition_by_str} 
+               ORDER BY (SELECT NULL) -- Keep the first one encountered
+           ) as row_num
+    FROM {staging_table}
+)
+-- Move duplicates to the problem table
+INSERT INTO {problem_table} ({all_columns}, ErrorReason)
+SELECT {all_columns}, 'Duplicate Record on Key: {partition_by_str}'
+FROM DuplicateCheck
+WHERE row_num > 1;
+
+-- Remove duplicates from the staging table
+WITH DuplicateDelete AS (
+    SELECT ROW_NUMBER() OVER (
+               PARTITION BY {partition_by_str} 
+               ORDER BY (SELECT NULL)
+           ) as row_num
+    FROM {staging_table}
+)
+DELETE FROM DuplicateDelete WHERE row_num > 1;
+"""
+
+# Execute
+cursor = conn.cursor()
+cursor.execute(duplicate_sql)
+conn.commit()
