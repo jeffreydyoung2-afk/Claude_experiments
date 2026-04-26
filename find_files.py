@@ -1,5 +1,5 @@
 """
-Search a set of directories for .xls/.xlsx files whose name contains a given
+Search a set of directories for .xls/.xlsx/.xlsb files whose name contains a given
 stub, look inside them for CASE_IDs from an input list, and write a CSV of
 (CASE_ID, SOURCE_FILE) pairs for every match found.
 
@@ -49,7 +49,7 @@ def find_excel_files(directories: list[str], stub: str) -> list[Path]:
         for p in iterator:
             if not p.is_file():
                 continue
-            if p.suffix.lower() not in (".xls", ".xlsx"):
+            if p.suffix.lower() not in (".xls", ".xlsx", ".xlsb"):
                 continue
             if stub not in p.name:
                 continue
@@ -63,8 +63,11 @@ def find_excel_files(directories: list[str], stub: str) -> list[Path]:
 
 def case_ids_in_file(path: Path, case_ids: set[str]) -> set[str]:
     """Return the subset of case_ids that appear anywhere in any sheet of the file."""
+    engine = "pyxlsb" if path.suffix.lower() == ".xlsb" else None
     try:
-        sheets = pd.read_excel(path, sheet_name=None, dtype=str, header=None)
+        sheets = pd.read_excel(
+            path, sheet_name=None, dtype=str, header=None, engine=engine
+        )
     except Exception as e:
         print(f"warning: failed to read {path}: {e}", file=sys.stderr)
         return set()
