@@ -1,0 +1,43 @@
+import csv
+
+# --- EXAMPLE 1: The Classic For Loop (Range) ---
+print("--- Counting to 3 ---")
+for i in range(1, 4):
+    print(f"Iteration number: {i}")
+
+print("\n")
+
+# --- EXAMPLE 2: Looping through a List ---
+fruits = ["Apple", "Banana", "Cherry"]
+print("--- Fruit List ---")
+for fruit in fruits:
+    print(f"I like {fruit}")
+
+print("\n")
+
+# --- EXAMPLE 3: Looping through a CSV File ---
+print("--- Processing CSV Data ---")
+try:
+    with open('employees.csv', mode='r') as file:
+        # DictReader turns each row into a dictionary for easy access
+        csv_reader = csv.DictReader(file)
+        
+        for row in csv_reader:
+            name = row['Name']
+            dept = row['Department']
+            salary = row['Salary']
+            
+            print(f"{name} works in {dept} and earns ${salary}.")
+            
+except FileNotFoundError:
+    print("Error: 'employees.csv' not found. Please create the file first!")
+
+print("\n")
+
+# --- EXAMPLE 4: The While Loop ---
+print("--- A Simple While Loop ---")
+countdown = 3
+while countdown > 0:
+    print(f"T-minus {countdown}...")
+    countdown -= 1
+print("Blast off!")
