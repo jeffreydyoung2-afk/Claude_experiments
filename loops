@@ -41,3 +41,25 @@ while countdown > 0:
     print(f"T-minus {countdown}...")
     countdown -= 1
 print("Blast off!")
+
+
+# A list of departments, where each department contains a list of employees
+office_data = [
+    ["Engineering", "Alice", "Dana"],
+    ["Design", "Bob"],
+    ["Marketing", "Charlie"]
+]
+
+print("--- Office Directory ---")
+
+# OUTER LOOP: Iterates through each department (the sub-lists)
+for department_list in office_data:
+    dept_name = department_list[0]
+    print(f"\nDepartment: {dept_name}")
+    
+    # INNER LOOP: Iterates through the employees in THAT specific department
+    # We start from index 1 to skip the department name itself
+    for employee in department_list[1:]:
+        print(f"  - {employee}")
+
+print("\n--- End of Directory ---")
