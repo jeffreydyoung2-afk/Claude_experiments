@@ -28,15 +28,17 @@ EndDates AS (
 
 SELECT 
     *,
-    -- STEP C: Derive Start Date
+    -- STEP C: Derive Start Date with strict chronologic validation
     CASE 
-        WHEN IDR_FILING_DATE IS NOT NULL THEN IDR_FILING_DATE
+        -- Attempt 1: IDR Filing Date (Must be prior/equal to End Date)
+        WHEN IDR_FILING_DATE IS NOT NULL 
+         AND IDR_FILING_DATE <= DRVD_IDR_END_DATE THEN IDR_FILING_DATE
         
-        -- Fallback 1: Case Received Date (Condition: Must be prior to End Date)
+        -- Attempt 2: Case Received Date (Must be prior/equal to End Date)
         WHEN CASE_RECEIVED_DATE IS NOT NULL 
          AND CASE_RECEIVED_DATE <= DRVD_IDR_END_DATE THEN CASE_RECEIVED_DATE
          
-        -- Fallback 2: Subtract 45 calendar day constant from Root Date
-        ELSE DATEADD(day, -45, ROOT_DATE) 
+        -- Ultimate Fallback: Force a logical start date by subtracting 45 days from the derived End Date
+        ELSE DATEADD(day, -45, DRVD_IDR_END_DATE) 
     END AS DRVD_IDR_START_DATE
 FROM EndDates;
