@@ -1,0 +1,42 @@
+WITH BaseData AS (
+    SELECT 
+        *,
+        -- STEP A: Establish the Root Date based on your hierarchy
+        COALESCE(
+            IDR_DECISION_DATE, 
+            IDR_FILING_DATE, 
+            IDR_CLOSED_DATE, 
+            CASE_RECEIVED_DATE, 
+            CASE_CLOSED_DATE
+        ) AS ROOT_DATE
+    FROM IDR_Cases
+),
+
+EndDates AS (
+    SELECT 
+        *,
+        -- STEP B: Derive End Date first so we can use it to validate the Start Date
+        CASE 
+            WHEN IDR_DECISION_DATE IS NOT NULL THEN IDR_DECISION_DATE
+            WHEN IDR_CLOSED_DATE IS NOT NULL THEN IDR_CLOSED_DATE
+            WHEN CASE_CLOSED_DATE IS NOT NULL THEN CASE_CLOSED_DATE
+            -- Fallback: Add our 45 calendar day constant to the Root Date
+            ELSE DATEADD(day, 45, ROOT_DATE) 
+        END AS DRVD_IDR_END_DATE
+    FROM BaseData
+)
+
+SELECT 
+    *,
+    -- STEP C: Derive Start Date
+    CASE 
+        WHEN IDR_FILING_DATE IS NOT NULL THEN IDR_FILING_DATE
+        
+        -- Fallback 1: Case Received Date (Condition: Must be prior to End Date)
+        WHEN CASE_RECEIVED_DATE IS NOT NULL 
+         AND CASE_RECEIVED_DATE <= DRVD_IDR_END_DATE THEN CASE_RECEIVED_DATE
+         
+        -- Fallback 2: Subtract 45 calendar day constant from Root Date
+        ELSE DATEADD(day, -45, ROOT_DATE) 
+    END AS DRVD_IDR_START_DATE
+FROM EndDates;
